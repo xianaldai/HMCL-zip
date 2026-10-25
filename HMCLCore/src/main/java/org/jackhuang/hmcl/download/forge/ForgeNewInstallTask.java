@@ -110,34 +110,6 @@ public class ForgeNewInstallTask extends Task<GameInstancePatch> {
                 return;
             }
 
-            Path jar = gameRepository.getLayout().getArtifactFile(processor.getJar());
-            if (!Files.isRegularFile(jar))
-                throw new FileNotFoundException("Game processor file not found, should be downloaded in preprocess");
-
-            String mainClass;
-            try (JarFile jarFile = new JarFile(jar.toFile())) {
-                mainClass = jarFile.getManifest().getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
-            }
-
-            if (StringUtils.isBlank(mainClass))
-                throw new Exception("Game processor jar does not have main class " + jar);
-
-            List<String> command = new ArrayList<>();
-            command.add(JavaRuntime.getDefault().getBinary().toString());
-            command.add("-cp");
-
-            List<String> classpath = new ArrayList<>(processor.getClasspath().size() + 1);
-            for (Artifact artifact : processor.getClasspath()) {
-                Path file = gameRepository.getLayout().getArtifactFile(artifact);
-                if (!Files.isRegularFile(file))
-                    throw new Exception("Game processor dependency missing");
-                classpath.add(file.toString());
-            }
-            classpath.add(jar.toString());
-            command.add(String.join(File.pathSeparator, classpath));
-
-            command.add(mainClass);
-
             List<String> args = new ArrayList<>(processor.getArgs().size());
             for (String arg : processor.getArgs()) {
                 String parsed = parseLiteral(arg, vars);
@@ -146,12 +118,48 @@ public class ForgeNewInstallTask extends Task<GameInstancePatch> {
                 args.add(parsed);
             }
 
-            command.addAll(args);
+            boolean patchedNatively = false;
+            try {
+                patchedNatively = BinaryPatcher.apply(processor.getJar(), args, outputs);
+            } catch (Exception e) {
+                LOG.warning("Failed to apply binary patches natively, falling back to the external processor", e);
+            }
 
-            LOG.info("Executing external processor " + processor.getJar().toString() + ", command line: " + new CommandBuilder().addAll(command).toString());
-            int exitCode = SystemUtils.callExternalProcess(command);
-            if (exitCode != 0)
-                throw new IOException("Game processor exited abnormally with code " + exitCode);
+            if (!patchedNatively) {
+                Path jar = gameRepository.getLayout().getArtifactFile(processor.getJar());
+                if (!Files.isRegularFile(jar))
+                    throw new FileNotFoundException("Game processor file not found, should be downloaded in preprocess");
+
+                String mainClass;
+                try (JarFile jarFile = new JarFile(jar.toFile())) {
+                    mainClass = jarFile.getManifest().getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
+                }
+
+                if (StringUtils.isBlank(mainClass))
+                    throw new Exception("Game processor jar does not have main class " + jar);
+
+                List<String> command = new ArrayList<>();
+                command.add(JavaRuntime.getDefault().getBinary().toString());
+                command.add("-cp");
+
+                List<String> classpath = new ArrayList<>(processor.getClasspath().size() + 1);
+                for (Artifact artifact : processor.getClasspath()) {
+                    Path file = gameRepository.getLayout().getArtifactFile(artifact);
+                    if (!Files.isRegularFile(file))
+                        throw new Exception("Game processor dependency missing");
+                    classpath.add(file.toString());
+                }
+                classpath.add(jar.toString());
+                command.add(String.join(File.pathSeparator, classpath));
+
+                command.add(mainClass);
+                command.addAll(args);
+
+                LOG.info("Executing external processor " + processor.getJar().toString() + ", command line: " + new CommandBuilder().addAll(command).toString());
+                int exitCode = SystemUtils.callExternalProcess(command);
+                if (exitCode != 0)
+                    throw new IOException("Game processor exited abnormally with code " + exitCode);
+            }
 
             for (Map.Entry<String, String> entry : outputs.entrySet()) {
                 Path artifact = Paths.get(entry.getKey());
